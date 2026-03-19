@@ -1,0 +1,40 @@
+/* static/style.css */
+body {
+    margin: 0;
+    overflow: hidden;
+    background: #020617;
+    font-family: 'Inter', sans-serif;
+}
+
+#video-container {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    width: 260px;
+    height: 195px;
+    border-radius: 15px;
+    overflow: hidden;
+    border: 3px solid #3b82f6;
+    background: #000;
+    z-index: 50;
+    /* Mirroring handled in JS for background consistency */
+}
+
+.ui-glass {
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.control-label {
+    font-size: 10px;
+    font-weight: bold;
+    color: #94a3b8;
+    margin-top: 10px;
+    margin-bottom: 5px;
+    display: block;
+}
+
+#bg-input {
+    display: none;
+}

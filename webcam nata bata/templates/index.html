@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leon Physics V5 - Hand Skeleton & BG Pro (Fixed)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background: #020617; font-family: 'Inter', sans-serif; }
+        #video-container {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 280px; height: 210px; border-radius: 20px;
+            overflow: hidden; border: 4px solid #3b82f6;
+            transform: scaleX(-1); background: #000; z-index: 50;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+        .ui-glass {
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        select { background: #1e293b; color: white; border: 1px solid #334155; padding: 8px; border-radius: 10px; font-size: 11px; width: 100%; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <div id="loader" class="absolute inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950 text-white text-center">
+        <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p class="font-bold tracking-widest uppercase">Calibrating Hand & Background AI...</p>
+    </div>
+
+    <div class="absolute top-0 left-0 p-6 z-40">
+        <div class="ui-glass p-6 rounded-[2rem] w-64 shadow-2xl">
+            <h2 class="text-blue-400 font-black italic text-xl mb-1">LEON PHYSICS</h2>
+            <p class="text-[10px] text-slate-400 mb-4 tracking-[0.2em]">SOLID ENGINE V5</p>
+
+            <div class="grid grid-cols-2 gap-2 mb-6">
+                <button onclick="spawn('box')" class="bg-blue-600 hover:bg-blue-500 text-white text-[11px] py-3 rounded-xl font-bold transition-all active:scale-95">SPAWN BOX</button>
+                <button onclick="spawn('slab')" class="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] py-3 rounded-xl font-bold transition-all active:scale-95">SPAWN SLAB</button>
+            </div>
+
+            <div class="space-y-3 border-t border-slate-700/50 pt-4">
+                <label class="text-[10px] font-bold text-blue-300 uppercase">Webcam Background</label>
+                <select id="bgMode" onchange="updateBgMode(this.value)">
+                    <option value="none">Original Camera</option>
+                    <option value="white">1. White</option>
+                    <option value="black">2. Black</option>
+                    <option value="blur">3. Blur</option>
+                    <option value="image">4. Custom Image</option>
+                </select>
+                <input type="file" id="bgUpload" accept="image/*" class="hidden" onchange="handleImageUpload(event)">
+                <button id="uploadBtn" onclick="document.getElementById('bgUpload').click()" class="hidden w-full text-[10px] bg-slate-800 hover:bg-slate-700 py-2 rounded-lg border border-slate-600 text-slate-300 transition">Change Image</button>
+            </div>
+
+            <button onclick="resetWorld()" class="w-full mt-6 border border-red-500 text-red-500 hover:bg-red-500 hover:text-white py-2.5 rounded-xl text-xs font-bold transition-all">RESET WORLD</button>
+
+            <div class="mt-4 p-3 bg-black/20 rounded-xl font-mono text-[10px] text-slate-500 space-y-1">
+                <div>OBJECTS: <span id="count" class="text-blue-400">0</span></div>
+                <div>PINCH GRAB: <span id="status" class="text-green-500">READY</span></div>
+                <div>HAND AI: <span class="text-green-500">ACTIVE</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="video-container">
+        <video id="input-video" class="hidden"></video>
+        <canvas id="gui-canvas" class="w-full h-full object-cover"></canvas>
+    </div>
+
+    <script>
+        const SETTINGS = { GRAVITY: 0.15, LERP: 0.3, PINCH: 2.5, FLOOR_Y: 0 };
+        let scene, camera, renderer, floor;
+        let physicsObjects = [];
+        let grabState = { left: null, right: null };
+        let handModels = { left: { joints: [], bones: [] }, right: { joints: [], bones: [] } };
+
+        let currentBgMode = 'none';
+        let customBgImg = new Image();
+        let customBgImgLoaded = false;
+        let selfieSegmentation, hands;
+        let lastHandResults = null;
+
+        customBgImg.onload = () => { customBgImgLoaded = true; };
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x020617);
+            scene.fog = new THREE.Fog(0x020617, 20, 100);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 15, 30);
+            camera.lookAt(0, 8, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+            const sun = new THREE.DirectionalLight(0xffffff, 1);
+            sun.position.set(10, 40, 15);
+            sun.castShadow = true;
+            sun.shadow.mapSize.set(1024, 1024);
+            scene.add(sun);
+
+            const floorGeo = new THREE.PlaneGeometry(100, 100);
+            const floorMat = new THREE.MeshPhongMaterial({ color: 0x0f172a });
+            floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+            scene.add(new THREE.GridHelper(100, 40, 0x1e293b, 0x0f172a));
+
+            setupHandEntities();
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function setupHandEntities() {
+            const colors = { white: 0xffffff, blue: 0x3b82f6, bone: 0xeeeeee };
+            ['left', 'right'].forEach(side => {
+                for(let i=0; i<21; i++) {
+                    const geometry = (i === 8) ? new THREE.SphereGeometry(0.5) : (i === 4 ? new THREE.SphereGeometry(0.6) : new THREE.SphereGeometry(0.3));
+                    const color = (i === 8) ? colors.blue : colors.white;
+                    const joint = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: color, roughness: 0.1, metalness: 0.1, emissive: color, emissiveIntensity: 0.4 }));
+                    joint.visible = false;
+                    scene.add(joint);
+                    handModels[side].joints.push(joint);
+                }
+                const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+                connections.forEach(() => {
+                    const bone = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1), new THREE.MeshStandardMaterial({ color: colors.bone, transparent: true, opacity: 0.35, emissive: colors.bone, emissiveIntensity: 0.1 }));
+                    bone.visible = false;
+                    scene.add(bone);
+                    handModels[side].bones.push(bone);
+                });
+            });
+        }
+
+        function updateBgMode(val) {
+            currentBgMode = val;
+            document.getElementById('uploadBtn').className = (val === 'image') ? 'block w-full text-[10px] bg-slate-800 hover:bg-slate-700 py-2 rounded-lg border border-slate-600 text-slate-300 transition' : 'hidden';
+        }
+
+        function handleImageUpload(e) {
+            const file = e.target.files[0];
+            if (file) {
+                customBgImgLoaded = false;
+                const reader = new FileReader();
+                reader.onload = (event) => { customBgImg.src = event.target.result; };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function draw2DHandSkeleton(ctx, landmarks, handedness) {
+            if (!landmarks || landmarks.length === 0) return;
+            landmarks.forEach((lm, index) => {
+                ctx.beginPath();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                for (const connection of HAND_CONNECTIONS) {
+                    const start = lm[connection[0]];
+                    const end = lm[connection[1]];
+                    ctx.moveTo(start.x * ctx.canvas.width, start.y * ctx.canvas.height);
+                    ctx.lineTo(end.x * ctx.canvas.width, end.y * ctx.canvas.height);
+                }
+                ctx.stroke();
+                for (let i = 0; i < 21; i++) {
+                    const point = lm[i];
+                    const x = point.x * ctx.canvas.width;
+                    const y = point.y * ctx.canvas.height;
+                    let color = 'white';
+                    let radius = 2;
+                    if (i === 8) { color = '#3b82f6'; radius = 4; }
+                    else if (i === 4) { color = 'white'; radius = 5; }
+                    ctx.beginPath();
+                    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+                    ctx.fillStyle = color;
+                    ctx.fill();
+                    ctx.closePath();
+                }
+            });
+        }
+
+        async function initTracking() {
+            const video = document.getElementById('input-video');
+            const canvas = document.getElementById('gui-canvas');
+            const ctx = canvas.getContext('2d');
+
+            hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+            hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+
+            selfieSegmentation = new SelfieSegmentation({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}` });
+            selfieSegmentation.setOptions({ modelSelection: 1 });
+
+            new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({image: video});
+                    await selfieSegmentation.send({image: video});
+                    document.getElementById('loader').style.display = 'none';
+                }, width: 640, height: 480
+            }).start();
+
+            hands.onResults((res) => {
+                lastHandResults = res;
+                Object.values(handModels).forEach(h => {
+                    h.joints.forEach(j => j.visible = false);
+                    h.bones.forEach(b => b.visible = false);
+                });
+                if (res.multiHandLandmarks) {
+                    res.multiHandLandmarks.forEach((lm, idx) => {
+                        const side = res.multiHandedness[idx].label.toLowerCase() === 'left' ? 'right' : 'left';
+                        const points = lm.map(p => new THREE.Vector3((0.5 - p.x) * 45, (0.5 - p.y) * 35 + 10, p.z * -25));
+                        update3DHand(side, points);
+                        handleInteraction(side, points[8], points[4]);
+                    });
+                }
+            });
+
+            // --- Logika Segmentasi yang Diperbaiki ---
+            selfieSegmentation.onResults((results) => {
+                ctx.save();
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // 1. Gambar Tubuh Pengguna (source-over, mask sebagai kliping)
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+                // Kliping: Gunakan mask untuk memotong tubuh
+                ctx.globalCompositeOperation = 'destination-in';
+                ctx.drawImage(results.segmentationMask, 0, 0, canvas.width, canvas.height);
+
+                // 2. Gambar Background (destination-over, mengisi area kosong di belakang)
+                ctx.globalCompositeOperation = 'destination-over';
+
+                if (currentBgMode === 'white') {
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                } else if (currentBgMode === 'black') {
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                } else if (currentBgMode === 'blur') {
+                    ctx.filter = 'blur(10px)';
+                    ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+                } else if (currentBgMode === 'image' && customBgImgLoaded) {
+                    // Pastikan gambar sudah dimuat sebelum menggambar
+                    ctx.drawImage(customBgImg, 0, 0, canvas.width, canvas.height);
+                } else {
+                    // Mode 'none' atau gambar kustom belum dimuat, gunakan video asli
+                    ctx.filter = 'none';
+                    ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+                }
+
+                // 3. Gambar Kursor Tangan 2D Di Atas Semuanya (source-over)
+                ctx.globalCompositeOperation = 'source-over';
+                if (lastHandResults && lastHandResults.multiHandLandmarks) {
+                    draw2DHandSkeleton(ctx, lastHandResults.multiHandLandmarks, lastHandResults.multiHandedness);
+                }
+
+                ctx.restore();
+            });
+        }
+
+        function update3DHand(side, points) {
+            points.forEach((p, i) => {
+                const joint = handModels[side].joints[i];
+                joint.position.copy(p);
+                joint.visible = true;
+            });
+            const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+            connections.forEach((conn, i) => {
+                const bone = handModels[side].bones[i];
+                const p1 = points[conn[0]];
+                const p2 = points[conn[1]];
+                const dir = new THREE.Vector3().subVectors(p2, p1);
+                bone.scale.set(1, dir.length(), 1);
+                bone.position.copy(p1).add(dir.multiplyScalar(0.5));
+                bone.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir.clone().normalize());
+                bone.visible = true;
+            });
+        }
+
+        function handleInteraction(side, indexPos, thumbPos) {
+            const dist = indexPos.distanceTo(thumbPos);
+            const statusEl = document.getElementById('status');
+            if (dist < SETTINGS.PINCH) {
+                if (!grabState[side]) {
+                    grabState[side] = physicsObjects.find(o => o.position.distanceTo(indexPos) < 6);
+                }
+                if (grabState[side]) {
+                    const obj = grabState[side];
+                    obj.userData.vY = 0;
+                    obj.userData.grabbed = true;
+                    obj.position.lerp(indexPos, SETTINGS.LERP);
+                    statusEl.innerText = "GRABBING";
+                    statusEl.className = "text-green-500 font-bold";
+                    checkCollisions(obj);
+                }
+            } else {
+                if (grabState[side]) {
+                    grabState[side].userData.grabbed = false;
+                    grabState[side] = null;
+                }
+                statusEl.innerText = "READY";
+                statusEl.className = "text-green-500 font-bold";
+            }
+        }
+
+        function updatePhysics() {
+            physicsObjects.forEach(obj => {
+                if (obj.userData.grabbed) return;
+                obj.userData.vY -= SETTINGS.GRAVITY;
+                obj.position.y += obj.userData.vY;
+                checkCollisions(obj);
+                if (obj.position.y < -30) obj.position.set(0, 30, 0);
+            });
+        }
+
+        function checkCollisions(obj) {
+            obj.geometry.computeBoundingBox();
+            const bounds = new THREE.Box3().setFromObject(obj);
+            const size = new THREE.Vector3();
+            bounds.getSize(size);
+            const halfHeight = size.y / 2;
+            if (obj.position.y - halfHeight < SETTINGS.FLOOR_Y) {
+                obj.position.y = SETTINGS.FLOOR_Y + halfHeight;
+                obj.userData.vY = 0;
+            }
+            physicsObjects.forEach(target => {
+                if (obj === target) return;
+                const targetBounds = new THREE.Box3().setFromObject(target);
+                if (bounds.intersectsBox(targetBounds)) {
+                    const overlapX = Math.min(bounds.max.x, targetBounds.max.x) - Math.max(bounds.min.x, targetBounds.min.x);
+                    const overlapY = Math.min(bounds.max.y, targetBounds.max.y) - Math.max(bounds.min.y, targetBounds.min.y);
+                    const overlapZ = Math.min(bounds.max.z, targetBounds.max.z) - Math.max(bounds.min.z, targetBounds.min.z);
+                    if (overlapY < overlapX && overlapY < overlapZ) {
+                        if (obj.position.y > target.position.y) {
+                            obj.position.y += overlapY;
+                            obj.userData.vY = 0;
+                        } else {
+                            obj.position.y -= overlapY;
+                        }
+                    } else if (overlapX < overlapZ) {
+                        obj.position.x += (obj.position.x > target.position.x ? overlapX : -overlapX);
+                    } else {
+                        obj.position.z += (obj.position.z > target.position.z ? overlapZ : -overlapZ);
+                    }
+                }
+            });
+        }
+
+        function spawn(type) {
+            let geo = type === 'box' ? new THREE.BoxGeometry(4, 4, 4) : new THREE.BoxGeometry(12, 2, 5);
+            const colors = [0x3b82f6, 0x10b981, 0x8b5cf6, 0xf59e0b, 0xef4444];
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: colors[Math.floor(Math.random()*colors.length)], roughness: 0.2 }));
+            mesh.position.set((Math.random()-0.5)*15, 30, (Math.random()-0.5)*10);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData = { vY: 0, grabbed: false };
+            scene.add(mesh);
+            physicsObjects.push(mesh);
+            document.getElementById('count').innerText = physicsObjects.length;
+        }
+
+        function resetWorld() {
+            physicsObjects.forEach(o => { scene.remove(o); });
+            physicsObjects = [];
+            document.getElementById('count').innerText = "0";
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            updatePhysics();
+            renderer.render(scene, camera);
+        }
+
+        window.onload = () => { init(); initTracking(); animate(); };
+        const HAND_CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+    </script>
+</body>
+</html>
