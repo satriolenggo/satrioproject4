@@ -2,14 +2,21 @@
   "version": 2,
   "builds": [
     {
-      "src": "webcam nata bata/main.py",
+      "src": "main.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
       "src": "/(.*)",
-      "dest": "webcam nata bata/main.py"
+      "dest": "main.py"
     }
-  ]
+  ],
+  "env": {
+    "PYTHON_VERSION": "3.9"
+  }
 }
